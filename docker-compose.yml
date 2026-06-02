@@ -1,0 +1,7 @@
+# Pour lancer l'API en local contre la DB Supabase (de dev ou de staging).
+# La DB n'est plus locale : Supabase héberge Postgres + Storage.
+services:
+  api:
+    build: ./apps/api
+    env_file: ./apps/api/.env
+    ports: ["3000:3000"]

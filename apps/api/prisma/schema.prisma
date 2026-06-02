@@ -1,0 +1,356 @@
+// MonHistory — schéma Prisma
+// Couvre section 19 du cahier des charges + extensions
+// (favoris, historique de lecture, OAuth, refresh tokens, paiements GeniusPay, réactions, commentaires).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- ENUMS ----------
+
+enum Role {
+  READER
+  ADMIN
+}
+
+enum AuthProvider {
+  LOCAL
+  GOOGLE
+  FACEBOOK
+  APPLE
+}
+
+enum BookStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum Category {
+  AMOUR
+  TRAHISON
+  CONFIANCE
+  DEPRESSION
+  MOTIVATION
+  MARIAGE
+  VIE_CHRETIENNE
+  HISTOIRES_VRAIES
+}
+
+enum SubscriptionPlan {
+  MONTHLY
+  QUARTERLY
+  YEARLY
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  EXPIRED
+  PENDING
+}
+
+enum PaymentProvider {
+  GENIUSPAY
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+enum PaymentPurpose {
+  BOOK_PURCHASE
+  SUBSCRIPTION
+}
+
+enum ReactionType {
+  LIKE       // ❤️ J'aime
+  TOUCHING   // 😢 Émouvant
+  SHOCKING   // 😡 Choquant
+}
+
+// ---------- USERS / AUTH ----------
+
+model User {
+  id           String       @id @default(uuid())
+  email        String       @unique
+  name         String
+  passwordHash String?      // null si OAuth-only
+  avatarUrl    String?
+  role         Role         @default(READER)
+  provider     AuthProvider @default(LOCAL)
+  providerId   String?      // sub OAuth
+  points       Int          @default(0) // gamification (section 20)
+  emailVerifiedAt DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  refreshTokens   RefreshToken[]
+  subscriptions   Subscription[]
+  purchases       Purchase[]
+  payments        Payment[]
+  favorites       Favorite[]
+  readingHistory  ReadingProgress[]
+  reactions       Reaction[]
+  comments        Comment[]
+  notifications   Notification[]
+  deviceTokens    DeviceToken[]
+  referralsMade   Referral[]   @relation("referrer")
+  referralUsed    Referral?    @relation("referred")
+
+  @@index([provider, providerId])
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  userAgent String?
+  ip        String?
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ---------- BOOKS / CHAPTERS / PAGES ----------
+
+model Book {
+  id              String     @id @default(uuid())
+  slug            String     @unique
+  title           String
+  description     String
+  author          String
+  coverImageUrl   String
+  category        Category
+  price           Int        // FCFA, 0 = gratuit à l'unité (uniquement via abonnement)
+  status          BookStatus @default(DRAFT)
+  publishedAt     DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  chapters        Chapter[]
+  purchases       Purchase[]
+  favorites       Favorite[]
+
+  @@index([category, status])
+  @@index([status, publishedAt])
+}
+
+model Chapter {
+  id            String   @id @default(uuid())
+  bookId        String
+  number        Int      // 1, 2, 3...
+  title         String
+  summary       String?
+  coverImageKey String?  // clé S3/R2, servie via URL signée
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  book          Book     @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  pages         Page[]
+  progress      ReadingProgress[]
+  reactions     Reaction[]
+  comments      Comment[]
+
+  @@unique([bookId, number])
+  @@index([bookId])
+}
+
+model Page {
+  id          String   @id @default(uuid())
+  chapterId   String
+  order       Int      // ordre dans le chapitre
+  imageKey    String   // clé S3/R2
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  chapter     Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+
+  @@unique([chapterId, order])
+  @@index([chapterId])
+}
+
+// ---------- ACCÈS PAYANT ----------
+
+/// Plans tarifaires actifs. Une seule source de vérité pour les prix.
+/// Côté code on ne lit JAMAIS le prix depuis un input utilisateur — toujours via ce modèle.
+model Plan {
+  id           String   @id @default(uuid())
+  code         String   @unique // ex. "STANDARD"
+  name         String
+  priceFcfa    Int      // montant en FCFA (XOF). Source de vérité unique.
+  durationDays Int      // durée de l'abonnement octroyé une fois payé
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([active])
+}
+
+model Subscription {
+  id          String             @id @default(uuid())
+  userId      String
+  plan        SubscriptionPlan
+  status      SubscriptionStatus @default(PENDING)
+  startsAt    DateTime
+  endsAt      DateTime
+  canceledAt  DateTime?
+  paymentId   String?            @unique
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  payment     Payment?           @relation(fields: [paymentId], references: [id])
+
+  @@index([userId, status])
+  @@index([status, endsAt])
+}
+
+model Purchase {
+  id          String   @id @default(uuid())
+  userId      String
+  bookId      String
+  amount      Int      // FCFA payés
+  paymentId   String   @unique
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  book        Book     @relation(fields: [bookId], references: [id], onDelete: Restrict)
+  payment     Payment  @relation(fields: [paymentId], references: [id])
+
+  @@unique([userId, bookId])
+  @@index([userId])
+}
+
+model Payment {
+  id              String          @id @default(uuid())
+  userId          String
+  provider        PaymentProvider @default(GENIUSPAY)
+  providerRef     String?         @unique // ID transaction côté provider
+  amount          Int
+  currency        String          @default("XOF")
+  status          PaymentStatus   @default(PENDING)
+  purpose         PaymentPurpose
+  metadata        Json?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscription    Subscription?
+  purchase        Purchase?
+
+  @@index([userId, status])
+}
+
+// ---------- ENGAGEMENT ----------
+
+model Favorite {
+  userId    String
+  bookId    String
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  book      Book     @relation(fields: [bookId], references: [id], onDelete: Cascade)
+
+  @@id([userId, bookId])
+  @@index([bookId])
+}
+
+model ReadingProgress {
+  id          String   @id @default(uuid())
+  userId      String
+  chapterId   String
+  lastPage    Int      @default(1)
+  completedAt DateTime?
+  updatedAt   DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chapter     Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, chapterId])
+  @@index([userId, updatedAt])
+}
+
+model Reaction {
+  id        String       @id @default(uuid())
+  userId    String
+  chapterId String
+  type      ReactionType
+  createdAt DateTime     @default(now())
+
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chapter   Chapter      @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, chapterId, type])
+  @@index([chapterId, type])
+}
+
+model Comment {
+  id        String   @id @default(uuid())
+  userId    String
+  chapterId String
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chapter   Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+
+  @@index([chapterId, createdAt])
+}
+
+/// Système de parrainage — non implémenté en V1 (V2). Le modèle reste en place
+/// pour ne pas créer de drift avec la DB Supabase qui contient déjà la table.
+model Referral {
+  id          String   @id @default(uuid())
+  referrerId  String
+  referredId  String   @unique
+  pointsAwarded Int    @default(0)
+  createdAt   DateTime @default(now())
+
+  referrer    User     @relation("referrer",  fields: [referrerId], references: [id], onDelete: Cascade)
+  referred    User     @relation("referred",  fields: [referredId], references: [id], onDelete: Cascade)
+
+  @@index([referrerId])
+}
+
+model DeviceToken {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique
+  platform  String   // "ios" | "android" | "web"
+  createdAt DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  type      String   // NEW_CHAPTER | NEW_BOOK | SUB_EXPIRING ...
+  title     String
+  body      String
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
