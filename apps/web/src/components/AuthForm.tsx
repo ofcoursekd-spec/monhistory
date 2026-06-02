@@ -75,6 +75,13 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
           Le serveur peut mettre quelques secondes — réseau lent.
         </p>
       )}
+      {mode === 'login' && (
+        <p className="text-center text-xs">
+          <Link href="/mot-de-passe-oublie" className="text-ink/50 hover:text-brand">
+            Mot de passe oublié ?
+          </Link>
+        </p>
+      )}
       <p className="text-center text-sm text-ink/60">
         {mode === 'login' ? (
           <>

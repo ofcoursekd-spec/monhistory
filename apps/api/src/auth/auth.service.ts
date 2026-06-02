@@ -1,6 +1,8 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -9,15 +11,21 @@ import { Role, User } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { randomBytes, createHash } from 'node:crypto';
 
+import { EmailService } from '../email/email.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthTokens, LoginDto, RegisterDto } from './dto';
 
+const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1h
+
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly email: EmailService,
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthTokens> {
@@ -32,6 +40,12 @@ export class AuthService {
         passwordHash,
       },
     });
+
+    // Fire-and-forget : on ne bloque pas l'inscription si l'email échoue.
+    this.email.sendWelcome(user.email, user.name).catch((err) => {
+      this.logger.warn(`Welcome email failed for ${user.email}: ${err}`);
+    });
+
     return this.issueTokens(user);
   }
 
@@ -55,7 +69,6 @@ export class AuthService {
       throw new UnauthorizedException('Refresh token invalide');
     }
 
-    // rotation : on révoque l'ancien et on en émet un nouveau
     await this.prisma.refreshToken.update({
       where: { id: record.id },
       data: { revokedAt: new Date() },
@@ -70,6 +83,67 @@ export class AuthService {
       data: { revokedAt: new Date() },
     });
   }
+
+  // ---------------------------------------------------------------------------
+  // Reset password
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Démarre un flow de reset. NE révèle PAS si l'email existe — réponse identique
+   * dans les deux cas pour empêcher l'énumération de comptes.
+   */
+  async forgotPassword(email: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    if (!user) return; // silencieux
+
+    // Invalide d'anciens tokens en cours pour ce user.
+    await this.prisma.passwordResetToken.updateMany({
+      where: { userId: user.id, usedAt: null, expiresAt: { gt: new Date() } },
+      data: { usedAt: new Date() },
+    });
+
+    const token = randomBytes(32).toString('hex');
+    await this.prisma.passwordResetToken.create({
+      data: {
+        userId: user.id,
+        tokenHash: this.hashToken(token),
+        expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS),
+      },
+    });
+
+    const siteUrl = this.config.get<string>('PUBLIC_SITE_URL') ?? 'http://localhost:3001';
+    const resetUrl = `${siteUrl}/reinitialisation?token=${token}`;
+    await this.email.sendPasswordReset(user.email, resetUrl);
+  }
+
+  async resetPassword(token: string, newPassword: string): Promise<void> {
+    if (newPassword.length < 8) throw new BadRequestException('Mot de passe trop court (8+)');
+
+    const tokenHash = this.hashToken(token);
+    const record = await this.prisma.passwordResetToken.findUnique({ where: { tokenHash } });
+    if (!record || record.usedAt || record.expiresAt < new Date()) {
+      throw new BadRequestException('Lien expiré ou invalide');
+    }
+
+    const passwordHash = await argon2.hash(newPassword);
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: record.userId },
+        data: { passwordHash },
+      }),
+      this.prisma.passwordResetToken.update({
+        where: { id: record.id },
+        data: { usedAt: new Date() },
+      }),
+      // Révoque tous les refresh tokens du user — force re-login partout.
+      this.prisma.refreshToken.updateMany({
+        where: { userId: record.userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+  }
+
+  // ---------------------------------------------------------------------------
 
   async issueTokens(user: User): Promise<AuthTokens> {
     const accessToken = await this.jwt.signAsync({

@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { Navbar } from '@/components/Navbar';
+import { Footer } from '@/components/Footer';
 import { BookCard } from '@/components/BookCard';
 import { apiGet } from '@/lib/api';
 import type { BookSummary } from '@/lib/types';
@@ -35,7 +36,7 @@ export default async function HomePage() {
               href="/abonnement"
               className="rounded-full bg-brand text-white px-6 py-3 font-medium hover:bg-brand-600 transition"
             >
-              Essayer Premium — 2 000 FCFA / mois
+              Essayer Premium — 1 999 FCFA / mois
             </Link>
             <Link
               href="/catalogue"
@@ -70,6 +71,7 @@ export default async function HomePage() {
           </div>
         )}
       </section>
+      <Footer />
     </>
   );
 }

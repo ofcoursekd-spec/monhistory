@@ -21,6 +21,7 @@ import { JobsModule } from './jobs/jobs.module';
 import { StorageModule } from './storage/storage.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { AccessModule } from './access/access.module';
+import { EmailModule } from './email/email.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { AccessModule } from './access/access.module';
     PrismaModule,
     StorageModule,
     AccessModule,
+    EmailModule,
     AuthModule,
     UsersModule,
     BooksModule,

@@ -16,6 +16,7 @@ import {
   SubscriptionStatus,
 } from '@prisma/client';
 
+import { EmailService } from '../email/email.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { GeniusPayProvider } from './providers/geniuspay.provider';
 
@@ -45,6 +46,7 @@ export class PaymentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly geniuspay: GeniusPayProvider,
+    private readonly email: EmailService,
     config: ConfigService,
   ) {
     this.publicSiteUrl =
@@ -371,6 +373,43 @@ export class PaymentsService {
       }
     });
     this.logger.log(`Paiement ${payment.id} confirmé et fulfillé`);
+
+    // Reçu par email (fire-and-forget : on ne fait pas échouer le webhook si email plante).
+    this.sendReceipt(payment).catch((err) => {
+      this.logger.warn(`Receipt email failed for payment ${payment.id}: ${err}`);
+    });
+  }
+
+  private async sendReceipt(payment: Payment) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: payment.userId },
+      select: { email: true },
+    });
+    if (!user?.email) return;
+
+    let description = 'MonHistory';
+    if (payment.purpose === PaymentPurpose.SUBSCRIPTION) {
+      const meta = payment.metadata as { plan_code?: string };
+      description = `Abonnement Premium ${meta.plan_code ?? ''}`.trim();
+    } else if (payment.purpose === PaymentPurpose.BOOK_PURCHASE) {
+      const m = payment.metadata as { bookId?: string; book_id?: string };
+      const bookId = m.bookId ?? m.book_id;
+      if (bookId) {
+        const book = await this.prisma.book.findUnique({
+          where: { id: bookId },
+          select: { title: true },
+        });
+        description = `Achat de "${book?.title ?? 'livre'}"`;
+      }
+    }
+
+    await this.email.sendPaymentReceipt(user.email, {
+      to: user.email,
+      paymentRef: payment.providerRef ?? payment.id,
+      amount: payment.amount,
+      description,
+      paidAt: new Date(),
+    });
   }
 
   // ---------------------------------------------------------------------------
