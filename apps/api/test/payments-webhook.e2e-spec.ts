@@ -1,19 +1,22 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { PaymentProvider, PaymentPurpose, PaymentStatus, SubscriptionPlan } from '@prisma/client';
+import { PaymentProvider, PaymentPurpose, PaymentStatus } from '@prisma/client';
 import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 
 /**
- * Vérifie l'idempotence du webhook de paiement et la création d'un abonnement actif.
+ * Vérifie l'idempotence du webhook GeniusPay et la création d'un abonnement actif.
+ * Le test n'envoie PAS de signature webhook : en NODE_ENV != production, le
+ * provider GeniusPay accepte les webhooks sans vérification (dev only).
  */
 describe('Payments webhook (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
   let userId: string;
   let paymentId: string;
+  let planCode: string;
 
   beforeAll(async () => {
     const mod = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -21,6 +24,18 @@ describe('Payments webhook (e2e)', () => {
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
     await app.init();
     prisma = app.get(PrismaService);
+
+    // Plan en DB (source de vérité du montant pour l'anti-tampering).
+    planCode = `TEST_PLAN_${Date.now()}`;
+    await prisma.plan.create({
+      data: {
+        code: planCode,
+        name: 'Test Plan',
+        priceFcfa: 2000,
+        durationDays: 30,
+        active: true,
+      },
+    });
 
     const user = await prisma.user.create({
       data: {
@@ -30,6 +45,7 @@ describe('Payments webhook (e2e)', () => {
       },
     });
     userId = user.id;
+
     const payment = await prisma.payment.create({
       data: {
         userId,
@@ -38,7 +54,7 @@ describe('Payments webhook (e2e)', () => {
         provider: PaymentProvider.GENIUSPAY,
         purpose: PaymentPurpose.SUBSCRIPTION,
         status: PaymentStatus.PENDING,
-        metadata: { plan: SubscriptionPlan.MONTHLY },
+        metadata: { plan_code: planCode, duration_days: 30 },
       },
     });
     paymentId = payment.id;
@@ -46,24 +62,40 @@ describe('Payments webhook (e2e)', () => {
 
   afterAll(async () => {
     await prisma.user.deleteMany({ where: { id: userId } });
+    await prisma.plan.deleteMany({ where: { code: planCode } });
     await app.close();
   });
 
-  it('crée un abonnement actif au callback SUCCEEDED', async () => {
+  /** Construit un payload webhook GeniusPay valide. */
+  const buildEvent = (overrides: Record<string, unknown> = {}) => ({
+    id: `evt_${Date.now()}`,
+    event: 'payment.success',
+    timestamp: Math.floor(Date.now() / 1000),
+    environment: 'sandbox',
+    data: {
+      reference: `MTX-TEST-${Date.now()}`,
+      amount: 2000,
+      currency: 'XOF',
+      status: 'completed',
+      metadata: { internal_payment_id: paymentId },
+      ...overrides,
+    },
+  });
+
+  it('crée un abonnement actif sur payment.success', async () => {
     await request(app.getHttpServer())
       .post('/payments/webhooks/geniuspay')
-      .send({ paymentReference: paymentId, status: 'SUCCEEDED' })
+      .send(buildEvent())
       .expect(200);
 
     const sub = await prisma.subscription.findFirst({ where: { userId } });
     expect(sub?.status).toBe('ACTIVE');
-    expect(sub?.plan).toBe('MONTHLY');
   });
 
-  it('est idempotent (rejeu)', async () => {
+  it('est idempotent (rejeu n\'crée pas un 2e abonnement)', async () => {
     await request(app.getHttpServer())
       .post('/payments/webhooks/geniuspay')
-      .send({ paymentReference: paymentId, status: 'SUCCEEDED' })
+      .send(buildEvent())
       .expect(200);
     const count = await prisma.subscription.count({ where: { userId } });
     expect(count).toBe(1);

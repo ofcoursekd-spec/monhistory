@@ -1,3 +1,4 @@
+import { Suspense } from 'react';
 import { AuthForm } from '@/components/AuthForm';
 import { Navbar } from '@/components/Navbar';
 
@@ -9,7 +10,9 @@ export default function RegisterPage() {
       <Navbar />
       <section className="mx-auto max-w-md px-4 py-16">
         <h1 className="font-display text-3xl font-bold mb-6">Rejoins MonHistory.</h1>
-        <AuthForm mode="register" />
+        <Suspense fallback={null}>
+          <AuthForm mode="register" />
+        </Suspense>
       </section>
     </>
   );
