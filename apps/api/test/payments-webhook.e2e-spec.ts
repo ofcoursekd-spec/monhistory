@@ -1,6 +1,8 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { PaymentProvider, PaymentPurpose, PaymentStatus } from '@prisma/client';
+import * as bodyParser from 'body-parser';
+import type { IncomingMessage, ServerResponse } from 'http';
 import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
@@ -21,6 +23,14 @@ describe('Payments webhook (e2e)', () => {
   beforeAll(async () => {
     const mod = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = mod.createNestApplication();
+    // Reproduit le middleware de main.ts : préserve le raw body pour HMAC.
+    app.use(
+      bodyParser.json({
+        verify: (req: IncomingMessage, _res: ServerResponse, buf: Buffer) => {
+          (req as IncomingMessage & { rawBody?: string }).rawBody = buf.toString('utf8');
+        },
+      }),
+    );
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
     await app.init();
     prisma = app.get(PrismaService);
