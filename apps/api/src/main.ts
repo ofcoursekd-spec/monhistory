@@ -21,8 +21,20 @@ async function bootstrap() {
       },
     }),
   );
+  // CORS : liste statique depuis CORS_ORIGINS + regex permissif pour tous les
+  // preview deployments Vercel (https://*.vercel.app) afin d'éviter de devoir
+  // ajouter chaque URL preview manuellement.
+  const staticOrigins = (config.get<string>('CORS_ORIGINS') ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   app.enableCors({
-    origin: config.get<string>('CORS_ORIGINS')?.split(',') ?? true,
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // requêtes server-to-server / curl
+      if (staticOrigins.includes(origin)) return cb(null, true);
+      if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) return cb(null, true);
+      return cb(new Error(`Origin ${origin} not allowed by CORS`), false);
+    },
     credentials: true,
   });
 
